@@ -1638,22 +1638,34 @@ async def start_command(
     message: Message,
     state: FSMContext
 ):
-    # Диагностический ответ — всегда отправляем
+    logger.info("Получен /start от user_id=%s username=%s", message.from_user.id, message.from_user.username)
+
+    # Всегда отвечаем диагностикой
     try:
         await message.answer("✅ Бот получил /start и работает!")
+        logger.info("Диагностический ответ отправлен user_id=%s", message.from_user.id)
     except Exception as e:
-        logger.exception("Не удалось ответить на /start: %s", e)
+        logger.exception("Не удалось отправить диагностический ответ: %s", e)
 
-    create_user(
-        message.from_user.id,
-        message.from_user.username
-    )
+    try:
+        create_user(
+            message.from_user.id,
+            message.from_user.username
+        )
 
-    await start_flow(
-        message.from_user.id,
-        state,
-        message
-    )
+        await start_flow(
+            message.from_user.id,
+            state,
+            message
+        )
+    except Exception as e:
+        logger.exception("Ошибка в start_flow: %s", e)
+        try:
+            await message.answer(f"⚠️ Ошибка при обработке /start: {e}")
+        except Exception:
+            pass
+
+
 
 
 # ============================================================
