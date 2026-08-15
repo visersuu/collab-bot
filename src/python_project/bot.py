@@ -1638,6 +1638,11 @@ async def start_command(
     message: Message,
     state: FSMContext
 ):
+    # Диагностический ответ — всегда отправляем
+    try:
+        await message.answer("✅ Бот получил /start и работает!")
+    except Exception as e:
+        logger.exception("Не удалось ответить на /start: %s", e)
 
     create_user(
         message.from_user.id,
