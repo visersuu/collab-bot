@@ -1294,7 +1294,11 @@ def get_video_session(
         return None
 
     choices = {}
-    raw_choices = row["choices_json"] if "choices_json" in row.keys() else None
+    try:
+        keys = list(row.keys())
+        raw_choices = row["choices_json"] if "choices_json" in keys else None
+    except Exception:
+        raw_choices = None
     if raw_choices:
         try:
             import json
@@ -1708,8 +1712,8 @@ async def start_command(
         logger.exception("Ошибка в start_flow: %s", e)
         try:
             await message.answer(f"⚠️ Ошибка при обработке /start: {e}")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.exception("Не удалось отправить партнёру: %s", e)
 
 
 
@@ -2362,12 +2366,19 @@ async def send_current_video(
 
     keyboard = video_keyboard(session)
 
-    await bot.send_video(
-        user_id,
-        video["file_id"],
-        caption=caption,
-        reply_markup=keyboard
-    )
+    try:
+        await bot.send_video(
+            user_id,
+            video["file_id"],
+            caption=caption,
+            reply_markup=keyboard
+        )
+        logger.info("Видео отправлено user_id=%s video_id=%s", user_id, video_id)
+    except Exception as e:
+        logger.exception(
+            "Не удалось отправить видео user_id=%s video_id=%s: %s",
+            user_id, video_id, e
+        )
 
 
 
@@ -2470,8 +2481,8 @@ async def video_reroll(
                 "нажми «Перевыбрать».</i>"
             )
 
-        except Exception:
-            pass
+        except Exception as e:
+            logger.exception("Не удалось отправить партнёру: %s", e)
 
         return
 
@@ -2688,8 +2699,8 @@ async def video_choice_selected(
         await bot.send_message(user_id, text)
         try:
             await bot.send_message(partner_id, text)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.exception("Не удалось отправить партнёру: %s", e)
         return
 
     if partner_choice and partner_choice != my_choice:
@@ -2701,8 +2712,8 @@ async def video_choice_selected(
         await bot.send_message(user_id, text)
         try:
             await bot.send_message(partner_id, text)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.exception("Не удалось отправить партнёру: %s", e)
         return
 
     await callback.message.answer(
@@ -2758,8 +2769,8 @@ async def video_choice_own(
         await bot.send_message(user_id, text)
         try:
             await bot.send_message(partner_id, text)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.exception("Не удалось отправить партнёру: %s", e)
         return
 
     if partner_choice and partner_choice != my_choice:
@@ -2771,8 +2782,8 @@ async def video_choice_own(
         await bot.send_message(user_id, text)
         try:
             await bot.send_message(partner_id, text)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.exception("Не удалось отправить партнёру: %s", e)
         return
 
     await callback.message.answer(
@@ -4592,8 +4603,8 @@ async def admin_ban(
                 "🌀 /start — найти нового собеседника"
             )
 
-        except Exception:
-            pass
+        except Exception as e:
+            logger.exception("Не удалось отправить партнёру: %s", e)
 
     ban_user(
         user_id,
