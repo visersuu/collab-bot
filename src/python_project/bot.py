@@ -326,6 +326,15 @@ class AdminState(StatesGroup):
     adding_sticker = State()
 
 
+class SupportState(StatesGroup):
+
+    waiting_for_admin_message = State()
+
+
+# message_id у админа -> user_id (для ответа админа)
+ADMIN_REPLY_MAP: dict[int, int] = {}
+
+
 # ============================================================
 # BASIC DB
 # ============================================================
@@ -1106,13 +1115,17 @@ def add_video(
 
 def get_videos():
 
-    return db.execute(
+    rows = db.execute(
         """
         SELECT *
         FROM videos
-        ORDER BY id ASC
         """
     ).fetchall()
+
+    # Максимально случайный порядок
+    rows = list(rows)
+    random.shuffle(rows)
+    return rows
 
 
 
@@ -1149,9 +1162,9 @@ def get_random_video(
     excluded_ids=None
 ):
 
-    excluded_ids = excluded_ids or []
+    excluded_ids = set(excluded_ids or [])
 
-    videos = get_videos()
+    videos = get_videos()  # already shuffled
 
     available = [
         v
@@ -1162,6 +1175,7 @@ def get_random_video(
     if not available:
         return None
 
+    # Дополнительная случайность
     return random.choice(available)
 
 
@@ -1725,14 +1739,11 @@ async def start_command(
     message: Message,
     state: FSMContext
 ):
-    logger.info("Получен /start от user_id=%s username=%s", message.from_user.id, message.from_user.username)
-
-    # Всегда отвечаем диагностикой
-    try:
-        await message.answer("✅ Бот получил /start и работает!")
-        logger.info("Диагностический ответ отправлен user_id=%s", message.from_user.id)
-    except Exception as e:
-        logger.exception("Не удалось отправить диагностический ответ: %s", e)
+    logger.info(
+        "Получен /start от user_id=%s username=%s",
+        message.from_user.id,
+        message.from_user.username
+    )
 
     try:
         create_user(
@@ -1747,10 +1758,6 @@ async def start_command(
         )
     except Exception as e:
         logger.exception("Ошибка в start_flow: %s", e)
-        try:
-            await message.answer(f"⚠️ Ошибка при обработке /start: {e}")
-        except Exception as e:
-            logger.exception("Не удалось отправить партнёру: %s", e)
 
 
 
@@ -3996,6 +4003,211 @@ async def edit_ability(
     )
 
 
+
+# ============================================================
+# RULES
+# ============================================================
+
+@dp.message(Command("rules"))
+async def rules_command(
+    message: Message
+):
+
+    if await ban_guard(message):
+        return
+
+    await message.answer(
+        "👾 <b>Для использования бота вы должны ознакомиться "
+        "с короткими простыми правилами:</b>\n\n"
+
+        "1. Спамить, оскорблять, грубо критиковать запрещено. "
+        "Имейте уважение к своему собеседнику.\n\n"
+
+        "2. Находить собеседника, а затем сразу его скипать запрещено.\n\n"
+
+        "3. Вбивать ложные юзы и ники вместо своих запрещено.\n\n"
+
+        "4. Вводить собеседника в заблуждение, специально тянуть время запрещено.\n\n"
+
+        "‼️ Нарушение правил карается как временным, так и перманентным баном в боте.\n\n"
+
+        "Также прошу пользователей сразу кидать жалобу на собеседника, "
+        "если он нарушил правила выше.\n\n"
+
+        "Если у вас есть вопрос к администратору бота, можете смело "
+        "задать его по команде /adminmessage.\n\n"
+
+        "За новостями: @wcuerandomiser"
+    )
+
+
+# ============================================================
+# ADMIN MESSAGE (поддержка)
+# ============================================================
+
+@dp.message(Command("adminmessage"))
+async def adminmessage_command(
+    message: Message,
+    state: FSMContext
+):
+
+    if await ban_guard(message):
+        return
+
+    await state.set_state(
+        SupportState.waiting_for_admin_message
+    )
+
+    await message.answer(
+        "📩 <b>Напишите сообщение администратору.</b>\n\n"
+        "Можно отправить текст, фото или видео.\n"
+        "Для отмены — /cancel"
+    )
+
+
+@dp.message(SupportState.waiting_for_admin_message)
+async def receive_admin_message(
+    message: Message,
+    state: FSMContext
+):
+
+    if message.text and message.text.strip().startswith("/"):
+        # другая команда — выходим из состояния
+        await state.clear()
+        return
+
+    user_id = message.from_user.id
+    username = message.from_user.username or "без_username"
+    user = get_user(user_id)
+
+    nickname = ""
+    if user:
+        nickname = user["nickname"] or user["roblox_username"] or ""
+
+    header = (
+        "📩 <b>Сообщение администратору</b>\n\n"
+        f"От: @{html.escape(username)}\n"
+        f"ID: <code>{user_id}</code>\n"
+    )
+    if nickname:
+        header += f"Ник: {html.escape(str(nickname))}\n"
+    header += "\nОтветьте <b>реплаем</b> на это сообщение, чтобы ответить пользователю."
+
+    try:
+        if message.text:
+            sent = await bot.send_message(
+                ADMIN_ID,
+                header + "\n\n" + html.escape(message.text)
+            )
+        elif message.photo:
+            sent = await bot.send_photo(
+                ADMIN_ID,
+                message.photo[-1].file_id,
+                caption=header + (
+                    "\n\n" + html.escape(message.caption)
+                    if message.caption else ""
+                )
+            )
+        elif message.video:
+            sent = await bot.send_video(
+                ADMIN_ID,
+                message.video.file_id,
+                caption=header + (
+                    "\n\n" + html.escape(message.caption)
+                    if message.caption else ""
+                )
+            )
+        else:
+            sent = await bot.send_message(
+                ADMIN_ID,
+                header + "\n\n(тип сообщения пока не поддерживается для пересылки)"
+            )
+
+        ADMIN_REPLY_MAP[sent.message_id] = user_id
+
+        await state.clear()
+        await message.answer(
+            "✅ <b>Сообщение отправлено администратору.</b>\n"
+            "Ожидайте ответа."
+        )
+    except Exception as e:
+        logger.exception("adminmessage failed: %s", e)
+        await message.answer(
+            "⚠️ Не удалось отправить сообщение. Попробуйте позже."
+        )
+        await state.clear()
+
+
+@dp.message(
+    lambda m: (
+        m.from_user
+        and m.from_user.id == ADMIN_ID
+        and m.reply_to_message is not None
+    )
+)
+async def admin_reply_to_user(
+    message: Message
+):
+    """Админ отвечает реплаем на сообщение из /adminmessage."""
+
+    if not is_admin(message.from_user.id):
+        return
+
+    reply = message.reply_to_message
+    if not reply:
+        return
+
+    target_id = ADMIN_REPLY_MAP.get(reply.message_id)
+
+    # Также ищем в тексте заголовка ID, если map потерялся после рестарта
+    if not target_id and reply.text:
+        import re as _re
+        m = _re.search(r"ID: <code>(\d+)</code>", reply.text or "")
+        if not m:
+            m = _re.search(r"ID: (\d+)", reply.text or "")
+        if m:
+            target_id = int(m.group(1))
+
+    if not target_id and reply.caption:
+        import re as _re
+        m = _re.search(r"ID: <code>(\d+)</code>", reply.caption or "")
+        if not m:
+            m = _re.search(r"ID: (\d+)", reply.caption or "")
+        if m:
+            target_id = int(m.group(1))
+
+    if not target_id:
+        return  # не наш reply
+
+    try:
+        if message.text:
+            await bot.send_message(
+                target_id,
+                message.text
+            )
+        elif message.photo:
+            await bot.send_photo(
+                target_id,
+                message.photo[-1].file_id,
+                caption=message.caption
+            )
+        elif message.video:
+            await bot.send_video(
+                target_id,
+                message.video.file_id,
+                caption=message.caption
+            )
+        else:
+            await message.answer("Этот тип сообщения пока не поддерживается.")
+            return
+
+        await message.answer("✅ Ответ отправлен пользователю.")
+    except Exception as e:
+        logger.exception("admin reply failed: %s", e)
+        await message.answer(f"⚠️ Не удалось отправить: {e}")
+
+
+
 # ============================================================
 # HELP
 # ============================================================
@@ -4010,34 +4222,19 @@ async def help_command(
 
     await message.answer(
         "💌 <b>Дорогие вкуеры!</b>\n\n"
-
         "🤖 Бот находится в <b>бета-версии</b>.\n\n"
-
-        "📢 Тгк с новостями: "
-        "@wcuerandomchannel\n\n"
-
+        "📢 Тгк с новостями: @wcuerandomiser\n\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
-
         "📖 <b>Команды бота:</b>\n\n"
-
-        "🎭 <code>/start</code> — "
-        "начать работу с ботом\n\n"
-
-        "🫐 <code>/myprofile</code> — "
-        "посмотреть свой профиль, "
+        "🎭 <code>/start</code> — начать работу с ботом\n\n"
+        "🫐 <code>/myprofile</code> — посмотреть свой профиль, "
         "оценки и статистику\n\n"
-
-        "⚙️ <code>/editprofile</code> — "
-        "редактировать профиль\n\n"
-
-        "❌ <code>/cancel</code> — "
-        "отменить поиск собеседника\n\n"
-
-        "🛑 <code>/stop</code> — "
-        "завершить текущую коллаборацию\n\n"
-
-        "🌀 <code>/help</code> — "
-        "открыть это меню"
+        "⚙️ <code>/editprofile</code> — редактировать профиль\n\n"
+        "❌ <code>/cancel</code> — отменить поиск собеседника\n\n"
+        "🛑 <code>/stop</code> — завершить текущую коллаборацию\n\n"
+        "📜 <code>/rules</code> — правила бота\n\n"
+        "📩 <code>/adminmessage</code> — написать администратору\n\n"
+        "🌀 <code>/help</code> — открыть это меню"
     )
 
 
@@ -5098,20 +5295,16 @@ async def relay_message(
     )
 
     # ========================================================
-    # ПЕРЕСЫЛАЕМ ПРОФИЛЬ ОТПРАВИТЕЛЯ
+    # Ник + сообщение в одном сообщении
     # ========================================================
 
-    try:
-
-        await send_relay_header(
-            partner_id,
-            user
-        )
-
-    except Exception:
-        logger.exception(
-            "Ошибка отправки заголовка"
-        )
+    nickname = (
+        user["nickname"]
+        or user["roblox_username"]
+        or message.from_user.username
+        or "Пользователь"
+    )
+    nick_prefix = f"🎭 <b>{html.escape(str(nickname))}</b>\n"
 
     # ========================================================
     # TEXT
@@ -5121,7 +5314,7 @@ async def relay_message(
 
         await bot.send_message(
             partner_id,
-            message.text
+            nick_prefix + html.escape(message.text)
         )
 
         return
@@ -5132,10 +5325,14 @@ async def relay_message(
 
     if message.photo:
 
+        cap = nick_prefix
+        if message.caption:
+            cap += html.escape(message.caption)
+
         await bot.send_photo(
             partner_id,
             message.photo[-1].file_id,
-            caption=message.caption
+            caption=cap
         )
 
         return
@@ -5146,10 +5343,14 @@ async def relay_message(
 
     if message.video:
 
+        cap = nick_prefix
+        if message.caption:
+            cap += html.escape(message.caption)
+
         await bot.send_video(
             partner_id,
             message.video.file_id,
-            caption=message.caption
+            caption=cap
         )
 
         return
@@ -5259,7 +5460,7 @@ async def main():
         "🎭 COLLAB BOT STARTED"
     )
     logger.info(
-        "BUILD_TAG=relay-fix-2026-08-17"
+        "BUILD_TAG=features-2026-08-17"
     )
 
     logger.info(
