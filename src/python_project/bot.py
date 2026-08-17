@@ -5041,15 +5041,19 @@ async def relay_message(
         return
 
     # ========================================================
-    # FSM
+    # FSM (aiogram 3.x — только через StorageKey)
     # ========================================================
 
     key = StorageKey(
-        bot_id=message.bot.id,
+        bot_id=bot.id,
         chat_id=message.chat.id,
         user_id=user_id
     )
-    current_state = await dp.storage.get_state(key)
+    try:
+        current_state = await dp.storage.get_state(key)
+    except TypeError:
+        # на всякий случай, если storage другой
+        current_state = None
 
     if current_state:
         return
@@ -5253,6 +5257,9 @@ async def main():
 
     logger.info(
         "🎭 COLLAB BOT STARTED"
+    )
+    logger.info(
+        "BUILD_TAG=relay-fix-2026-08-17"
     )
 
     logger.info(
