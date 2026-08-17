@@ -259,6 +259,28 @@ add_column_if_missing(
     "TEXT DEFAULT NULL"
 )
 
+
+# Video stats
+add_column_if_missing(
+    "videos",
+    "selected_count",
+    "INTEGER DEFAULT 0"
+)
+
+add_column_if_missing(
+    "videos",
+    "own_idea_count",
+    "INTEGER DEFAULT 0"
+)
+
+# Per-session choices (JSON)
+add_column_if_missing(
+    "video_sessions",
+    "choices_json",
+    "TEXT DEFAULT '{}'"
+)
+
+
 add_column_if_missing(
     "users",
     "nickname",
@@ -1240,9 +1262,10 @@ def create_video_session(
                 current_index,
                 reroll_count,
                 pressed_user1,
-                pressed_user2
+                pressed_user2,
+                choices_json
             )
-            VALUES (?, ?, ?, 0, 0, 0, 0)
+            VALUES (?, ?, ?, 0, 0, 0, 0, '{}')
             """,
             (
                 user_id,
@@ -1270,6 +1293,15 @@ def get_video_session(
     if not row:
         return None
 
+    choices = {}
+    raw_choices = row["choices_json"] if "choices_json" in row.keys() else None
+    if raw_choices:
+        try:
+            import json
+            choices = json.loads(raw_choices) or {}
+        except Exception:
+            choices = {}
+
     return {
         "user_id": row["user_id"],
         "partner_id": row["partner_id"],
@@ -1278,6 +1310,7 @@ def get_video_session(
         "reroll_count": row["reroll_count"],
         "pressed_user1": bool(row["pressed_user1"]),
         "pressed_user2": bool(row["pressed_user2"]),
+        "choices": choices,
     }
 
 
@@ -1285,6 +1318,8 @@ def save_video_session(
     user_id: int,
     session: dict
 ):
+
+    import json
 
     db.execute(
         """
@@ -1294,7 +1329,8 @@ def save_video_session(
             current_index = ?,
             reroll_count = ?,
             pressed_user1 = ?,
-            pressed_user2 = ?
+            pressed_user2 = ?,
+            choices_json = ?
 
         WHERE user_id = ?
         """,
@@ -1304,8 +1340,9 @@ def save_video_session(
             ),
             session["current_index"],
             session["reroll_count"],
-            int(session["pressed_user1"]),
-            int(session["pressed_user2"]),
+            int(session.get("pressed_user1", 0)),
+            int(session.get("pressed_user2", 0)),
+            json.dumps(session.get("choices") or {}, ensure_ascii=False),
             user_id
         )
     )
@@ -1319,6 +1356,13 @@ def save_pair_video_session(
     session: dict
 ):
 
+    import json
+
+    choices_json = json.dumps(
+        session.get("choices") or {},
+        ensure_ascii=False
+    )
+
     for user_id in (user1, user2):
 
         db.execute(
@@ -1330,7 +1374,8 @@ def save_pair_video_session(
                 current_index = ?,
                 reroll_count = ?,
                 pressed_user1 = ?,
-                pressed_user2 = ?
+                pressed_user2 = ?,
+                choices_json = ?
 
             WHERE user_id = ?
             """,
@@ -1341,8 +1386,9 @@ def save_pair_video_session(
                 ),
                 session["current_index"],
                 session["reroll_count"],
-                int(session["pressed_user1"]),
-                int(session["pressed_user2"]),
+                int(session.get("pressed_user1", 0)),
+                int(session.get("pressed_user2", 0)),
+                choices_json,
                 user_id
             )
         )
@@ -2156,37 +2202,103 @@ async def idea_yes(
 # SEND VIDEO
 # ============================================================
 
+
+# ============================================================
+# VIDEO CHOICE STATS
+# ============================================================
+
+def increment_video_stat(video_id: int, field: str):
+
+    allowed = {
+        "selected_count",
+        "own_idea_count"
+    }
+
+    if field not in allowed:
+        raise ValueError("Недопустимое поле видео")
+
+    db.execute(
+        f"""
+        UPDATE videos
+        SET {field} = COALESCE({field}, 0) + 1
+        WHERE id = ?
+        """,
+        (video_id,)
+    )
+
+    db_commit()
+
+
+def get_video_stats(video_id: int):
+
+    row = db.execute(
+        """
+        SELECT selected_count, own_idea_count
+        FROM videos
+        WHERE id = ?
+        """,
+        (video_id,)
+    ).fetchone()
+
+    return row
+
+
+def clear_session_choices(session: dict):
+    """Сбросить выборы текущего видео (при перевыборе)."""
+    session["choices"] = {}
+
+
+def get_current_video_id(session: dict):
+    history = session.get("history") or []
+    index = session.get("current_index", 0)
+    if not history or index < 0 or index >= len(history):
+        return None
+    return history[index]
+
+
 def video_keyboard(
     session: dict
 ):
+    """Клавиатура под видео: выбор звука + навигация."""
 
-    buttons = []
+    rows = [
+        [
+            InlineKeyboardButton(
+                text="🔥 Я выбрал этот звук",
+                callback_data="video_choice_selected"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="💡 У меня своя идея",
+                callback_data="video_choice_own"
+            )
+        ]
+    ]
 
-    if session["current_index"] > 0:
+    navigation = []
 
-        buttons.append(
+    if session.get("current_index", 0) > 0:
+        navigation.append(
             InlineKeyboardButton(
                 text="◀️",
                 callback_data="video_previous"
             )
         )
 
-    if session["reroll_count"] < 3:
-
-        buttons.append(
+    if session.get("reroll_count", 0) < 3:
+        navigation.append(
             InlineKeyboardButton(
                 text="🔄 Перевыбрать",
                 callback_data="video_reroll"
             )
         )
 
-    if not buttons:
-        return None
+    if navigation:
+        rows.append(navigation)
 
     return InlineKeyboardMarkup(
-        inline_keyboard=[
-            buttons
-        ]
+        inline_keyboard=rows
     )
 
 
@@ -2230,20 +2342,25 @@ async def send_current_video(
     if not video:
         return
 
-    keyboard = video_keyboard(
-        session
-    )
+    selected_count = 0
+    try:
+        selected_count = int(video["selected_count"] or 0)
+    except (KeyError, TypeError, ValueError):
+        selected_count = 0
+
+    popular_text = ""
+    if selected_count > 0:
+        popular_text = "\n\n🔥 <b>Выбирают чаще всего</b>"
 
     caption = (
-        "🐳 <b>Рандомный звук для вашего "
-        "видео выбран!</b>\n\n"
-
-        "💙 <i>Совет: вы должны найти "
-        "компромисс, если одному человеку "
-        "нравится, а другому нет.</i>\n\n"
-
+        "🐳 <b>Рандомный звук для вашего видео найден!</b>"
+        f"{popular_text}\n\n"
+        "💙 <i>Совет: вы должны найти компромисс, "
+        "если одному человеку нравится, а другому нет.</i>\n\n"
         "🦋 Не устраивайте конфликты!"
     )
+
+    keyboard = video_keyboard(session)
 
     await bot.send_video(
         user_id,
@@ -2251,6 +2368,8 @@ async def send_current_video(
         caption=caption,
         reply_markup=keyboard
     )
+
+
 
 
 # ============================================================
@@ -2396,6 +2515,9 @@ async def video_reroll(
     session["pressed_user1"] = False
     session["pressed_user2"] = False
 
+    # При перевыборе сбрасываем выборы для нового видео
+    clear_session_choices(session)
+
     save_pair_video_session(
         user_id,
         partner_id,
@@ -2469,6 +2591,193 @@ async def video_previous(
 
     await send_current_video(
         user_id
+    )
+
+
+# ============================================================
+# VIDEO CHOICE: «Я выбрал этот звук» / «У меня своя идея»
+# ============================================================
+
+async def save_video_choice(
+    user_id: int,
+    choice: str
+):
+    """
+    Сохраняет выбор пользователя для текущего видео.
+    Один пользователь — один выбор. Повторное нажатие игнорируется.
+    Возвращает (video_id, partner_id, session, already_chose) или None.
+    """
+
+    user = get_user(user_id)
+
+    if not user or not user["partner_id"]:
+        return None
+
+    partner_id = user["partner_id"]
+    session = get_video_session(user_id)
+
+    if not session:
+        return None
+
+    video_id = get_current_video_id(session)
+
+    if video_id is None:
+        return None
+
+    choices = session.get("choices") or {}
+    video_key = str(video_id)
+    video_choices = dict(choices.get(video_key) or {})
+
+    # Уже выбирал — не меняем первоначальный выбор
+    if str(user_id) in video_choices:
+        return video_id, partner_id, session, True
+
+    video_choices[str(user_id)] = choice
+    choices[video_key] = video_choices
+    session["choices"] = choices
+
+    save_pair_video_session(user_id, partner_id, session)
+
+    return video_id, partner_id, session, False
+
+
+@dp.callback_query(
+    F.data == "video_choice_selected"
+)
+async def video_choice_selected(
+    callback: CallbackQuery
+):
+
+    await callback.answer()
+
+    user_id = callback.from_user.id
+
+    if is_banned(user_id):
+        return
+
+    result = await save_video_choice(user_id, "selected")
+
+    if not result:
+        return
+
+    video_id, partner_id, session, already = result
+
+    if already:
+        await callback.message.answer(
+            "🌀 <b>Ты уже сделал выбор по этому видео.</b>"
+        )
+        return
+
+    choices = (session.get("choices") or {}).get(str(video_id)) or {}
+    my_choice = choices.get(str(user_id))
+    partner_choice = choices.get(str(partner_id))
+
+    if my_choice == "selected" and partner_choice == "selected":
+
+        if not choices.get("_counted"):
+            increment_video_stat(video_id, "selected_count")
+            choices["_counted"] = True
+            session["choices"][str(video_id)] = choices
+            save_pair_video_session(user_id, partner_id, session)
+
+        text = (
+            "🔥 <b>Вы оба выбрали этот звук!</b>\n\n"
+            "🦋 Этот выбор сохранён."
+        )
+
+        await bot.send_message(user_id, text)
+        try:
+            await bot.send_message(partner_id, text)
+        except Exception:
+            pass
+        return
+
+    if partner_choice and partner_choice != my_choice:
+        text = (
+            "🌀 <b>Мнения разошлись..</b>\n\n"
+            "💙 Видео остаётся доступным — "
+            "возможно, оно ещё пригодится."
+        )
+        await bot.send_message(user_id, text)
+        try:
+            await bot.send_message(partner_id, text)
+        except Exception:
+            pass
+        return
+
+    await callback.message.answer(
+        "🌀 <b>Твой выбор сохранён.</b>\n\n"
+        "<i>Ждём мнение второго пользователя...</i>"
+    )
+
+
+@dp.callback_query(
+    F.data == "video_choice_own"
+)
+async def video_choice_own(
+    callback: CallbackQuery
+):
+
+    await callback.answer()
+
+    user_id = callback.from_user.id
+
+    if is_banned(user_id):
+        return
+
+    result = await save_video_choice(user_id, "own")
+
+    if not result:
+        return
+
+    video_id, partner_id, session, already = result
+
+    if already:
+        await callback.message.answer(
+            "🌀 <b>Ты уже сделал выбор по этому видео.</b>"
+        )
+        return
+
+    choices = (session.get("choices") or {}).get(str(video_id)) or {}
+    my_choice = choices.get(str(user_id))
+    partner_choice = choices.get(str(partner_id))
+
+    if my_choice == "own" and partner_choice == "own":
+
+        if not choices.get("_counted"):
+            increment_video_stat(video_id, "own_idea_count")
+            choices["_counted"] = True
+            session["choices"][str(video_id)] = choices
+            save_pair_video_session(user_id, partner_id, session)
+
+        text = (
+            "💙 <b>Хорошо.</b>\n\n"
+            "🦋 Удачных съёмок!"
+        )
+
+        await bot.send_message(user_id, text)
+        try:
+            await bot.send_message(partner_id, text)
+        except Exception:
+            pass
+        return
+
+    if partner_choice and partner_choice != my_choice:
+        text = (
+            "🌀 <b>Мнения разошлись..</b>\n\n"
+            "💙 Видео остаётся доступным — "
+            "возможно, оно ещё пригодится."
+        )
+        await bot.send_message(user_id, text)
+        try:
+            await bot.send_message(partner_id, text)
+        except Exception:
+            pass
+        return
+
+    await callback.message.answer(
+        "🌀 <b>Твой выбор сохранён.</b>\n\n"
+        "<i>Ждём мнение второго пользователя...</i>"
     )
 
 
