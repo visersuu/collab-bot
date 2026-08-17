@@ -23,6 +23,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.storage.base import StorageKey
 from aiogram.types import (
     Message,
     CallbackQuery,
@@ -278,6 +279,12 @@ add_column_if_missing(
     "video_sessions",
     "choices_json",
     "TEXT DEFAULT '{}'"
+)
+
+add_column_if_missing(
+    "users",
+    "seen_videos",
+    "TEXT DEFAULT ''"
 )
 
 
@@ -1107,6 +1114,36 @@ def get_videos():
         """
     ).fetchall()
 
+
+
+def get_user_seen_videos(user_id: int) -> list:
+    user = get_user(user_id)
+    if not user:
+        return []
+    raw = ""
+    try:
+        raw = user["seen_videos"] or ""
+    except (KeyError, IndexError):
+        raw = ""
+    if not raw:
+        return []
+    result = []
+    for x in str(raw).split(","):
+        x = x.strip()
+        if x.isdigit():
+            result.append(int(x))
+    return result
+
+
+def mark_videos_seen(user_id: int, video_ids: list):
+    existing = set(get_user_seen_videos(user_id))
+    for vid in video_ids:
+        existing.add(int(vid))
+    update_user(
+        user_id,
+        "seen_videos",
+        ",".join(str(v) for v in sorted(existing))
+    )
 
 def get_random_video(
     excluded_ids=None
@@ -2176,7 +2213,15 @@ async def idea_yes(
 
         return
 
-    first_video = get_random_video()
+    seen1 = get_user_seen_videos(user_id)
+    seen2 = get_user_seen_videos(partner_id)
+    excluded = list(set(seen1 + seen2))
+    first_video = get_random_video(excluded_ids=excluded)
+
+    # Если все видео уже видели — начинаем заново из полного списка
+    if not first_video:
+        first_video = get_random_video()
+
 
     if not first_video:
 
@@ -2374,6 +2419,13 @@ async def send_current_video(
             reply_markup=keyboard
         )
         logger.info("Видео отправлено user_id=%s video_id=%s", user_id, video_id)
+        try:
+            mark_videos_seen(user_id, [video_id])
+            partner = get_user(user_id)
+            if partner and partner["partner_id"]:
+                mark_videos_seen(partner["partner_id"], [video_id])
+        except Exception as e:
+            logger.exception("Не удалось отметить seen: %s", e)
     except Exception as e:
         logger.exception(
             "Не удалось отправить видео user_id=%s video_id=%s: %s",
@@ -4992,11 +5044,12 @@ async def relay_message(
     # FSM
     # ========================================================
 
-    current_state = await dp.storage.get_state(
-        bot=bot,
-        chat_id=user_id,
+    key = StorageKey(
+        bot_id=message.bot.id,
+        chat_id=message.chat.id,
         user_id=user_id
     )
+    current_state = await dp.storage.get_state(key)
 
     if current_state:
         return
